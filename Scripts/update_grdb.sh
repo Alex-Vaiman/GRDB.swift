@@ -7,16 +7,86 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARTIFACTS_DIR="$ROOT_DIR/BinaryArtifacts"
 OUTPUT_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.xcframework"
+ARTIFACT_VERSION_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.version"
 BUILD_ROOT="$ROOT_DIR/.build/grdb-sqlcipher"
 BUILD_PRODUCTS_DIR="$BUILD_ROOT/BuildProducts"
 OBJROOT="$BUILD_ROOT/obj"
 SYMROOT="$BUILD_ROOT/sym"
-POD_REQUIREMENT="${1:-"~> 6.24"}"
+DEFAULT_POD_REQUIREMENT="~> 6.24"
+POD_REQUIREMENT="${1:-""}"
 IOS_DEPLOYMENT_TARGET="12.0"
 VERBOSE="${VERBOSE:-0}"
+CURRENT_ARTIFACT_VERSION=""
+LATEST_REMOTE_VERSION=""
 
 log() {
   printf '[update_grdb] %s\n' "$*"
+}
+
+read_current_artifact_version() {
+  if [[ -f "$ARTIFACT_VERSION_PATH" ]]; then
+    local recorded_version
+    recorded_version=$(head -n 1 "$ARTIFACT_VERSION_PATH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -n "$recorded_version" ]]; then
+      echo "$recorded_version"
+      return
+    fi
+  fi
+  if [[ ! -d "$OUTPUT_PATH" ]]; then
+    return
+  fi
+  local info_plist
+  info_plist=$(find "$OUTPUT_PATH" -path "*.framework/Info.plist" -print -quit 2>/dev/null || true)
+  if [[ -z "$info_plist" ]]; then
+    return
+  fi
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$info_plist" 2>/dev/null || true
+}
+
+print_current_artifact_version() {
+  CURRENT_ARTIFACT_VERSION=$(read_current_artifact_version || true)
+  if [[ -n "$CURRENT_ARTIFACT_VERSION" ]]; then
+    log "Current bundled GRDB.swift version: $CURRENT_ARTIFACT_VERSION"
+  else
+    log "No existing GRDBSQLCipher.xcframework version detected"
+  fi
+}
+
+fetch_latest_remote_version() {
+  pod trunk info "GRDB.swift" 2>/dev/null | \
+    sed -n 's/^[[:space:]]*-[[:space:]]\([0-9][0-9.]*\).*/\1/p' | \
+    LC_ALL=C sort -V | tail -n 1
+}
+
+print_latest_remote_version() {
+  LATEST_REMOTE_VERSION=$(fetch_latest_remote_version || true)
+  if [[ -n "$LATEST_REMOTE_VERSION" ]]; then
+    log "Latest GRDB.swift release per CocoaPods trunk: $LATEST_REMOTE_VERSION"
+  else
+    log "Unable to determine latest GRDB.swift release (pod trunk info failed?)"
+  fi
+}
+
+write_artifact_version_file() {
+  local version="$1"
+  if [[ -z "$version" ]]; then
+    version=$(read_current_artifact_version || true)
+  fi
+  if [[ -z "$version" ]]; then
+    rm -f "$ARTIFACT_VERSION_PATH"
+    log "Artifact version file removed (no version detected)"
+    return
+  fi
+  printf '%s\n' "$version" >"$ARTIFACT_VERSION_PATH"
+  log "Recorded artifact version $version at $ARTIFACT_VERSION_PATH"
+}
+
+read_resolved_pod_version() {
+  local lock_path="$BUILD_ROOT/Podfile.lock"
+  if [[ ! -f "$lock_path" ]]; then
+    return
+  fi
+  awk -F'[()]' '/GRDB\.swift\/SQLCipher/ {if (NF >= 2) {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}}' "$lock_path"
 }
 
 run_cmd() {
@@ -52,6 +122,20 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$BUILD_ROOT"
+
+print_current_artifact_version
+print_latest_remote_version
+if [[ -z "$POD_REQUIREMENT" ]]; then
+  if [[ -n "$LATEST_REMOTE_VERSION" ]]; then
+    POD_REQUIREMENT="$LATEST_REMOTE_VERSION"
+    log "No version requirement provided -> defaulting to latest release $POD_REQUIREMENT"
+  else
+    POD_REQUIREMENT="$DEFAULT_POD_REQUIREMENT"
+    log "No version requirement provided and latest release unavailable -> falling back to $POD_REQUIREMENT"
+  fi
+else
+  log "Using user-supplied version requirement: $POD_REQUIREMENT"
+fi
 
 log "Generating Podfile for GRDB.swift/SQLCipher ($POD_REQUIREMENT)"
 cat >"$BUILD_ROOT/Podfile" <<PODFILE
@@ -92,6 +176,20 @@ log "Running pod install"
 pushd "$BUILD_ROOT" >/dev/null
 run_cmd pod install
 popd >/dev/null
+
+resolved_version=$(read_resolved_pod_version || true)
+if [[ -n "$resolved_version" ]]; then
+  log "Resolved GRDB.swift/SQLCipher version: $resolved_version"
+else
+  log "Could not determine resolved GRDB.swift/SQLCipher version from Podfile.lock"
+fi
+
+if [[ -n "$CURRENT_ARTIFACT_VERSION" && -n "$resolved_version" && -d "$OUTPUT_PATH" ]]; then
+  if [[ "$CURRENT_ARTIFACT_VERSION" == "$resolved_version" ]]; then
+    log "Resolved version matches existing artifact ($resolved_version); skipping build."
+    exit 0
+  fi
+fi
 
 pods_project="$BUILD_ROOT/Pods/Pods.xcodeproj"
 if [[ ! -d "$pods_project" ]]; then
@@ -189,5 +287,7 @@ run_cmd xcodebuild -create-xcframework \
   -framework "$FRAMEWORK_DEVICE" \
   -framework "$FRAMEWORK_SIMULATOR" \
   -output "$OUTPUT_PATH"
+
+write_artifact_version_file "$resolved_version"
 
 log "Done. XCFramework available at $OUTPUT_PATH"
