@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARTIFACTS_DIR="$ROOT_DIR/BinaryArtifacts"
 OUTPUT_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.xcframework"
+SQLCIPHER_OUTPUT_PATH="$ARTIFACTS_DIR/SQLCipher.xcframework"
 ARTIFACT_VERSION_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.version"
 BUILD_ROOT="$ROOT_DIR/.build/grdb-sqlcipher"
 BUILD_PRODUCTS_DIR="$BUILD_ROOT/BuildProducts"
@@ -271,22 +272,38 @@ SIMULATOR_BUILD_DIR=$(get_target_build_dir iphonesimulator)
 FRAMEWORK_DEVICE="$DEVICE_BUILD_DIR/$PRODUCT_NAME.framework"
 FRAMEWORK_SIMULATOR="$SIMULATOR_BUILD_DIR/$PRODUCT_NAME.framework"
 
+SQLCIPHER_FRAMEWORK_DEVICE="$BUILD_PRODUCTS_DIR/Release-iphoneos/SQLCipher/SQLCipher.framework"
+SQLCIPHER_FRAMEWORK_SIMULATOR="$BUILD_PRODUCTS_DIR/Release-iphonesimulator/SQLCipher/SQLCipher.framework"
+
 if [[ ! -d "$FRAMEWORK_DEVICE" || ! -d "$FRAMEWORK_SIMULATOR" ]]; then
-  echo "error: Expected framework products were not found" >&2
+  echo "error: Expected GRDB framework products were not found" >&2
+  exit 1
+fi
+
+if [[ ! -d "$SQLCIPHER_FRAMEWORK_DEVICE" || ! -d "$SQLCIPHER_FRAMEWORK_SIMULATOR" ]]; then
+  echo "error: Expected SQLCipher framework products were not found" >&2
   exit 1
 fi
 
 log "Device framework: $FRAMEWORK_DEVICE"
 log "Simulator framework: $FRAMEWORK_SIMULATOR"
+log "Device SQLCipher framework: $SQLCIPHER_FRAMEWORK_DEVICE"
+log "Simulator SQLCipher framework: $SQLCIPHER_FRAMEWORK_SIMULATOR"
 
-rm -rf "$OUTPUT_PATH"
+rm -rf "$OUTPUT_PATH" "$SQLCIPHER_OUTPUT_PATH"
 mkdir -p "$ARTIFACTS_DIR"
 
-log "Assembling XCFramework ..."
+log "Assembling GRDB XCFramework ..."
 run_cmd xcodebuild -create-xcframework \
   -framework "$FRAMEWORK_DEVICE" \
   -framework "$FRAMEWORK_SIMULATOR" \
   -output "$OUTPUT_PATH"
+
+log "Assembling SQLCipher XCFramework ..."
+run_cmd xcodebuild -create-xcframework \
+  -framework "$SQLCIPHER_FRAMEWORK_DEVICE" \
+  -framework "$SQLCIPHER_FRAMEWORK_SIMULATOR" \
+  -output "$SQLCIPHER_OUTPUT_PATH"
 
 write_artifact_version_file "$resolved_version"
 

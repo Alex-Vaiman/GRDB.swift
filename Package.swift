@@ -9,13 +9,17 @@ let package = Package(
     products: [
         .library(
             name: "GRDBSQLCipher",
-            targets: ["GRDBSQLCipher"]
+            targets: ["GRDBSQLCipher", "SQLCipher"]
         )
     ],
     targets: [
         .binaryTarget(
             name: "GRDBSQLCipher",
             path: "BinaryArtifacts/GRDBSQLCipher.xcframework"
+        ),
+        .binaryTarget(
+            name: "SQLCipher",
+            path: "BinaryArtifacts/SQLCipher.xcframework"
         )
     ]
 )
