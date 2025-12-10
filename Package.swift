@@ -10,6 +10,10 @@ let package = Package(
         .library(
             name: "GRDBSQLCipher",
             targets: ["GRDBSQLCipher", "SQLCipher"]
+        ),
+        .library(
+            name: "SQLCipher",  // ← הוסף product נפרד!
+            targets: ["SQLCipher"]
         )
     ],
     targets: [
