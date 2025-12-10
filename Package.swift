@@ -12,7 +12,7 @@ let package = Package(
             targets: ["GRDBSQLCipher", "SQLCipher"]
         ),
         .library(
-            name: "SQLCipher",  // ← הוסף product נפרד!
+            name: "SQLCipher",  // ← זה חסר אצלך!
             targets: ["SQLCipher"]
         )
     ],
