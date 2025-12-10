@@ -3,49 +3,88 @@ set -euo pipefail
 
 # Usage: ./Scripts/update_grdb.sh [COCOAPODS_VERSION_REQUIREMENT]
 # Example: ./Scripts/update_grdb.sh "~> 6.27"
+# If no argument is provided, script defaults to the latest release from CocoaPods trunk (when available).
+# It skips building if the resolved version matches the bundled artifact version.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARTIFACTS_DIR="$ROOT_DIR/BinaryArtifacts"
 OUTPUT_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.xcframework"
 SQLCIPHER_OUTPUT_PATH="$ARTIFACTS_DIR/SQLCipher.xcframework"
 ARTIFACT_VERSION_PATH="$ARTIFACTS_DIR/GRDBSQLCipher.version"
+
 BUILD_ROOT="$ROOT_DIR/.build/grdb-sqlcipher"
 BUILD_PRODUCTS_DIR="$BUILD_ROOT/BuildProducts"
 OBJROOT="$BUILD_ROOT/obj"
 SYMROOT="$BUILD_ROOT/sym"
+
 DEFAULT_POD_REQUIREMENT="~> 6.24"
 POD_REQUIREMENT="${1:-""}"
 IOS_DEPLOYMENT_TARGET="12.0"
 VERBOSE="${VERBOSE:-0}"
+KEEP_BUILD_ROOT="${KEEP_BUILD_ROOT:-0}"
+
 CURRENT_ARTIFACT_VERSION=""
 LATEST_REMOTE_VERSION=""
 
-log() {
-  printf '[update_grdb] %s\n' "$*"
+log() { printf '[update_grdb] %s\n' "$*"; }
+
+run_cmd() {
+  if [[ "$VERBOSE" != "0" ]]; then
+    "$@"
+  else
+    "$@" >/dev/null
+  fi
 }
+
+need_cmd() { command -v "$1" >/dev/null || { echo "error: $1 is required" >&2; exit 1; }; }
+
+need_cmd pod
+need_cmd xcodebuild
+need_cmd ruby
+need_cmd sed
+need_cmd awk
+need_cmd head
+need_cmd find
+need_cmd sort
+need_cmd tail
+need_cmd nm
+
+cleanup() {
+  if [[ "$KEEP_BUILD_ROOT" == "0" ]]; then
+    rm -rf "$BUILD_ROOT"
+  else
+    log "KEEP_BUILD_ROOT=1 -> preserving $BUILD_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+mkdir -p "$BUILD_ROOT" "$ARTIFACTS_DIR"
 
 read_current_artifact_version() {
   if [[ -f "$ARTIFACT_VERSION_PATH" ]]; then
     local recorded_version
-    recorded_version=$(head -n 1 "$ARTIFACT_VERSION_PATH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    recorded_version="$(head -n 1 "$ARTIFACT_VERSION_PATH" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     if [[ -n "$recorded_version" ]]; then
       echo "$recorded_version"
       return
     fi
   fi
+
   if [[ ! -d "$OUTPUT_PATH" ]]; then
     return
   fi
+
   local info_plist
-  info_plist=$(find "$OUTPUT_PATH" -path "*.framework/Info.plist" -print -quit 2>/dev/null || true)
+  info_plist="$(find "$OUTPUT_PATH" -path "*.framework/Info.plist" -print -quit 2>/dev/null || true)"
   if [[ -z "$info_plist" ]]; then
     return
   fi
+
   /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$info_plist" 2>/dev/null || true
 }
 
 print_current_artifact_version() {
-  CURRENT_ARTIFACT_VERSION=$(read_current_artifact_version || true)
+  CURRENT_ARTIFACT_VERSION="$(read_current_artifact_version || true)"
   if [[ -n "$CURRENT_ARTIFACT_VERSION" ]]; then
     log "Current bundled GRDB.swift version: $CURRENT_ARTIFACT_VERSION"
   else
@@ -60,7 +99,7 @@ fetch_latest_remote_version() {
 }
 
 print_latest_remote_version() {
-  LATEST_REMOTE_VERSION=$(fetch_latest_remote_version || true)
+  LATEST_REMOTE_VERSION="$(fetch_latest_remote_version || true)"
   if [[ -n "$LATEST_REMOTE_VERSION" ]]; then
     log "Latest GRDB.swift release per CocoaPods trunk: $LATEST_REMOTE_VERSION"
   else
@@ -71,7 +110,7 @@ print_latest_remote_version() {
 write_artifact_version_file() {
   local version="$1"
   if [[ -z "$version" ]]; then
-    version=$(read_current_artifact_version || true)
+    version="$(read_current_artifact_version || true)"
   fi
   if [[ -z "$version" ]]; then
     rm -f "$ARTIFACT_VERSION_PATH"
@@ -90,42 +129,15 @@ read_resolved_pod_version() {
   awk -F'[()]' '/GRDB\.swift\/SQLCipher/ {if (NF >= 2) {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}}' "$lock_path"
 }
 
-run_cmd() {
-  if [[ "$VERBOSE" != "0" ]]; then
-    "$@"
-  else
-    "$@" >/dev/null
-  fi
+is_valid_xcframework() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  find "$path" -maxdepth 3 -type d -name "*.framework" -print -quit 2>/dev/null | grep -q "."
 }
-
-command -v pod >/dev/null || {
-  echo "error: CocoaPods (pod) is not installed" >&2
-  exit 1
-}
-command -v xcodebuild >/dev/null || {
-  echo "error: xcodebuild is not available (install Xcode command line tools)" >&2
-  exit 1
-}
-command -v ruby >/dev/null || {
-  echo "error: ruby is required to bootstrap a throwaway host project" >&2
-  exit 1
-}
-
-KEEP_BUILD_ROOT="${KEEP_BUILD_ROOT:-0}"
-
-cleanup() {
-  if [[ "$KEEP_BUILD_ROOT" == "0" ]]; then
-    rm -rf "$BUILD_ROOT"
-  else
-    log "KEEP_BUILD_ROOT=1 -> preserving $BUILD_ROOT"
-  fi
-}
-trap cleanup EXIT
-
-mkdir -p "$BUILD_ROOT"
 
 print_current_artifact_version
 print_latest_remote_version
+
 if [[ -z "$POD_REQUIREMENT" ]]; then
   if [[ -n "$LATEST_REMOTE_VERSION" ]]; then
     POD_REQUIREMENT="$LATEST_REMOTE_VERSION"
@@ -168,6 +180,7 @@ require 'xcodeproj'
 build_dir = ENV.fetch('BUILD_DIR')
 project_path = File.join(build_dir, 'GRDBSQLCipherHost.xcodeproj')
 FileUtils.rm_rf(project_path)
+
 project = Xcodeproj::Project.new(project_path)
 project.new_target(:application, 'GRDBSQLCipherHost', :ios, ENV.fetch('DEPLOYMENT_TARGET'))
 project.save
@@ -178,14 +191,14 @@ pushd "$BUILD_ROOT" >/dev/null
 run_cmd pod install
 popd >/dev/null
 
-resolved_version=$(read_resolved_pod_version || true)
+resolved_version="$(read_resolved_pod_version || true)"
 if [[ -n "$resolved_version" ]]; then
   log "Resolved GRDB.swift/SQLCipher version: $resolved_version"
 else
   log "Could not determine resolved GRDB.swift/SQLCipher version from Podfile.lock"
 fi
 
-if [[ -n "$CURRENT_ARTIFACT_VERSION" && -n "$resolved_version" && -d "$OUTPUT_PATH" ]]; then
+if [[ -n "$CURRENT_ARTIFACT_VERSION" && -n "$resolved_version" ]] && is_valid_xcframework "$OUTPUT_PATH"; then
   if [[ "$CURRENT_ARTIFACT_VERSION" == "$resolved_version" ]]; then
     log "Resolved version matches existing artifact ($resolved_version); skipping build."
     exit 0
@@ -198,42 +211,47 @@ if [[ ! -d "$pods_project" ]]; then
   exit 1
 fi
 
-available_target=$(xcodebuild -list -project "$pods_project" 2>/dev/null | awk '/Targets:/ {flag=1; next} /Build Configurations:/ {flag=0} flag {gsub(/^ +| +$/,"", $0); if ($0 ~ /GRDB/) {print $0; exit}}')
+available_target="$(xcodebuild -list -project "$pods_project" 2>/dev/null | awk '
+  /Targets:/ {flag=1; next}
+  /Build Configurations:/ {flag=0}
+  flag {
+    gsub(/^ +| +$/,"", $0)
+    if ($0 == "GRDB.swift") { print $0; exit }
+    if ($0 ~ /GRDB/) { cand=$0 }
+  }
+  END { if (cand) print cand }
+')"
+
 if [[ -z "$available_target" ]]; then
   echo "error: Could not find a target that looks like GRDB inside Pods project" >&2
   exit 1
 fi
 
-echo "Using CocoaPods target: $available_target"
-
-trimmed_build_setting() {
-  local setting="$1"
-  awk -F'= ' -v key="$setting" '
-    {
-      k=$1
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
-      if (k == key) {
-        v=$2
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-        print v
-        exit
-      }
-    }'
-}
+log "Using CocoaPods GRDB target: $available_target"
 
 get_product_name() {
   xcodebuild -project "$pods_project" -target "$available_target" \
     -configuration Release -sdk "$1" -showBuildSettings 2>/dev/null | \
-    trimmed_build_setting "PRODUCT_NAME"
+    awk -F'= ' '
+      {
+        k=$1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+        if (k == "PRODUCT_NAME") {
+          v=$2
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+          print v
+          exit
+        }
+      }'
 }
 
-PRODUCT_NAME=$(get_product_name iphoneos)
+PRODUCT_NAME="$(get_product_name iphoneos)"
 if [[ -z "$PRODUCT_NAME" ]]; then
   echo "error: Unable to determine PRODUCT_NAME from xcodebuild" >&2
   exit 1
 fi
 
-echo "Detected product: $PRODUCT_NAME"
+log "Detected GRDB product: $PRODUCT_NAME"
 
 XCODEBUILD_COMMON_ARGS=(
   -project "$pods_project"
@@ -253,6 +271,21 @@ build_for_sdk() {
   run_cmd xcodebuild "${XCODEBUILD_COMMON_ARGS[@]}" -sdk "$sdk"
 }
 
+trimmed_build_setting() {
+  local setting="$1"
+  awk -F'= ' -v key="$setting" '
+    {
+      k=$1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+      if (k == key) {
+        v=$2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+        print v
+        exit
+      }
+    }'
+}
+
 get_target_build_dir() {
   local sdk="$1"
   xcodebuild "${XCODEBUILD_COMMON_ARGS[@]}" -sdk "$sdk" -showBuildSettings 2>/dev/null | \
@@ -266,14 +299,21 @@ mkdir -p "$BUILD_PRODUCTS_DIR"
 build_for_sdk iphoneos
 build_for_sdk iphonesimulator
 
-DEVICE_BUILD_DIR=$(get_target_build_dir iphoneos)
-SIMULATOR_BUILD_DIR=$(get_target_build_dir iphonesimulator)
+DEVICE_BUILD_DIR="$(get_target_build_dir iphoneos)"
+SIMULATOR_BUILD_DIR="$(get_target_build_dir iphonesimulator)"
 
 FRAMEWORK_DEVICE="$DEVICE_BUILD_DIR/$PRODUCT_NAME.framework"
 FRAMEWORK_SIMULATOR="$SIMULATOR_BUILD_DIR/$PRODUCT_NAME.framework"
 
+# Keep the known-working CocoaPods output paths for SQLCipher (as in the original script)
 SQLCIPHER_FRAMEWORK_DEVICE="$BUILD_PRODUCTS_DIR/Release-iphoneos/SQLCipher/SQLCipher.framework"
 SQLCIPHER_FRAMEWORK_SIMULATOR="$BUILD_PRODUCTS_DIR/Release-iphonesimulator/SQLCipher/SQLCipher.framework"
+
+if [[ "$VERBOSE" != "0" ]]; then
+  log "Debug: listing SQLCipher build folders"
+  ls -la "$BUILD_PRODUCTS_DIR/Release-iphoneos/SQLCipher" || true
+  ls -la "$BUILD_PRODUCTS_DIR/Release-iphonesimulator/SQLCipher" || true
+fi
 
 if [[ ! -d "$FRAMEWORK_DEVICE" || ! -d "$FRAMEWORK_SIMULATOR" ]]; then
   echo "error: Expected GRDB framework products were not found" >&2
@@ -305,6 +345,22 @@ run_cmd xcodebuild -create-xcframework \
   -framework "$SQLCIPHER_FRAMEWORK_SIMULATOR" \
   -output "$SQLCIPHER_OUTPUT_PATH"
 
+[[ -d "$OUTPUT_PATH" ]] || { echo "error: GRDBSQLCipher.xcframework not created at $OUTPUT_PATH" >&2; exit 1; }
+[[ -d "$SQLCIPHER_OUTPUT_PATH" ]] || { echo "error: SQLCipher.xcframework not created at $SQLCIPHER_OUTPUT_PATH" >&2; exit 1; }
+
+# Minimal verification: sqlcipher should export sqlite3_key
+SQL_BIN="$SQLCIPHER_OUTPUT_PATH/ios-arm64/SQLCipher.framework/SQLCipher"
+if [[ -f "$SQL_BIN" ]]; then
+  if ! nm -gU "$SQL_BIN" | grep -q "sqlite3_key"; then
+    echo "error: SQLCipher binary does not export sqlite3_key (codec likely missing / wrong binary)" >&2
+    exit 1
+  fi
+else
+  log "Warning: SQLCipher binary not found at expected path; skipping nm verification"
+fi
+
 write_artifact_version_file "$resolved_version"
 
-log "Done. XCFramework available at $OUTPUT_PATH"
+log "Done. XCFrameworks available at:"
+log "  $OUTPUT_PATH"
+log "  $SQLCIPHER_OUTPUT_PATH"
