@@ -9,7 +9,7 @@ let package = Package(
     products: [
         .library(
             name: "GRDBSQLCipher",
-            targets: ["GRDBSQLCipher"]
+            targets: ["GRDBSQLCipher", "SQLCipher"]
         ),
         .library(
             name: "SQLCipher",
